@@ -83,6 +83,7 @@ export enum PromptingStrategy {
 	Nes41Miniv3 = 'nes41miniv3',
 	SimplifiedSystemPrompt = 'simplifiedSystemPrompt',
 	Xtab275 = 'xtab275',
+	Xtab275Confidence = 'xtab275Confidence',
 	XtabAggressiveness = 'xtabAggressiveness',
 	PatchBased = 'patchBased',
 }
@@ -106,6 +107,7 @@ export namespace ResponseFormat {
 			case PromptingStrategy.Nes41Miniv3:
 				return ResponseFormat.UnifiedWithXml;
 			case PromptingStrategy.Xtab275:
+			case PromptingStrategy.Xtab275Confidence:
 			case PromptingStrategy.XtabAggressiveness:
 				return ResponseFormat.EditWindowOnly;
 			case PromptingStrategy.PatchBased:

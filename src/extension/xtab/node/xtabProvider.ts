@@ -54,7 +54,7 @@ import { constructTaggedFile, countTokensForLines, getUserPrompt, N_LINES_ABOVE,
 import { nes41Miniv3SystemPrompt, simplifiedPrompt, systemPromptTemplate, unifiedModelSystemPrompt, xtab275SystemPrompt } from '../common/systemMessages';
 import { PromptTags, ResponseTags } from '../common/tags';
 import { CurrentDocument } from '../common/xtabCurrentDocument';
-import { XtabCustomDiffPatchResponseHandler } from './xtabCustomDiffPatchResponseHandler';
+import { ConfidenceLevel, shouldShowSuggestion, XtabCustomDiffPatchResponseHandler } from './xtabCustomDiffPatchResponseHandler';
 import { XtabEndpoint } from './xtabEndpoint';
 import { XtabNextCursorPredictor } from './xtabNextCursorPredictor';
 import { charCount, constructMessages, linesWithBackticksRemoved, toLines } from './xtabUtils';
@@ -629,6 +629,7 @@ export class XtabProvider implements IStatelessNextEditProvider {
 		})();
 
 		let cleanedLinesStream: AsyncIterableObject<string>;
+		const enableConfidenceFiltering = promptPieces.opts.promptingStrategy === PromptingStrategy.Xtab275Confidence;
 
 		if (opts.responseFormat === xtabPromptOptions.ResponseFormat.EditWindowOnly) {
 			cleanedLinesStream = linesStream;
@@ -717,6 +718,36 @@ export class XtabProvider implements IStatelessNextEditProvider {
 			assertNever(opts.responseFormat);
 		}
 
+		// If confidence filtering is enabled, wrap the stream to extract confidence from the last line and strip confidence tags
+		let parsedConfidence: ConfidenceLevel | undefined;
+		if (enableConfidenceFiltering) {
+			// Transform stream to look ahead one line, so we can detect which line is last
+			// Confidence tag should only be parsed from the last line
+			cleanedLinesStream = new AsyncIterableObject(async (emitter) => {
+				let previousLine: string | undefined;
+				for await (const line of cleanedLinesStream) {
+					if (previousLine !== undefined) {
+						// Emit the previous line (not the last one yet)
+						emitter.emitOne(previousLine);
+					}
+					previousLine = line;
+				}
+				// Now previousLine is the last line - check for confidence
+				if (previousLine !== undefined) {
+					const confidence = XtabCustomDiffPatchResponseHandler.parseConfidenceLevel(previousLine);
+					if (confidence !== undefined) {
+						parsedConfidence = confidence;
+						const strippedLine = XtabCustomDiffPatchResponseHandler.stripConfidenceTag(previousLine);
+						if (strippedLine !== '') {
+							emitter.emitOne(strippedLine);
+						}
+					} else {
+						emitter.emitOne(previousLine);
+					}
+				}
+			});
+		}
+
 		const diffOptions: ResponseProcessor.DiffParams = {
 			emitFastCursorLineChange: this.configService.getExperimentBasedConfig(ConfigKey.TeamInternal.InlineEditsXtabProviderEmitFastCursorLineChange, this.expService),
 			nLinesToConverge: this.configService.getExperimentBasedConfig(ConfigKey.TeamInternal.InlineEditsXtabNNonSignificantLinesToConverge, this.expService),
@@ -725,6 +756,8 @@ export class XtabProvider implements IStatelessNextEditProvider {
 
 		tracer.trace(`starting to diff stream against edit window lines with latency ${fetchRequestStopWatch.elapsed()} ms`);
 
+		const aggressivenessLevel = promptPieces.aggressivenessLevel;
+
 		(async () => {
 			let i = 0;
 			let hasBeenDelayed = false;
@@ -732,6 +765,12 @@ export class XtabProvider implements IStatelessNextEditProvider {
 				for await (const edit of ResponseProcessor.diff(editWindowLines, cleanedLinesStream, cursorOriginalLinesOffset, diffOptions)) {
 
 					tracer.trace(`ResponseProcessor streamed edit #${i} with latency ${fetchRequestStopWatch.elapsed()} ms`);
+
+					// Check confidence filtering - if enabled and confidence doesn't meet threshold, skip all edits
+					if (enableConfidenceFiltering && !shouldShowSuggestion(parsedConfidence, aggressivenessLevel)) {
+						tracer.trace(`Skipping edit due to confidence filtering: confidence=${parsedConfidence}, aggressiveness=${aggressivenessLevel}`);
+						continue;
+					}
 
 					const singleLineEdits: LineReplacement[] = [];
 					if (edit.lineRange.startLineNumber === edit.lineRange.endLineNumberExclusive || // we don't want to run diff on insertion
@@ -1067,6 +1106,7 @@ export class XtabProvider implements IStatelessNextEditProvider {
 				return simplifiedPrompt;
 			case xtabPromptOptions.PromptingStrategy.PatchBased:
 			case xtabPromptOptions.PromptingStrategy.Xtab275:
+			case xtabPromptOptions.PromptingStrategy.Xtab275Confidence:
 			case xtabPromptOptions.PromptingStrategy.XtabAggressiveness:
 				return xtab275SystemPrompt;
 			case xtabPromptOptions.PromptingStrategy.Nes41Miniv3:

@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { AggressivenessLevel } from '../../../platform/inlineEdits/common/dataTypes/xtabPromptOptions';
 import { NoNextEditReason, PushEdit, StreamedEdit } from '../../../platform/inlineEdits/common/statelessNextEditProvider';
 import { Result } from '../../../util/common/result';
 import { AsyncIterableObject } from '../../../util/vs/base/common/async';
@@ -11,6 +12,34 @@ import { LineRange } from '../../../util/vs/editor/common/core/ranges/lineRange'
 import { OffsetRange } from '../../../util/vs/editor/common/core/ranges/offsetRange';
 import { StringText } from '../../../util/vs/editor/common/core/text/abstractText';
 import { ResponseTags } from '../common/tags';
+
+export enum ConfidenceLevel {
+	Low = 'low',
+	Medium = 'medium',
+	High = 'high',
+}
+
+/**
+ * Determines if a suggestion should be shown based on confidence level and aggressiveness setting.
+ * - Low aggressiveness: only show high confidence suggestions
+ * - Medium aggressiveness: show medium and high confidence suggestions
+ * - High aggressiveness: show all suggestions
+ */
+export function shouldShowSuggestion(confidence: ConfidenceLevel | undefined, aggressiveness: AggressivenessLevel): boolean {
+	// If no confidence level is provided, show the suggestion (backwards compatibility)
+	if (confidence === undefined) {
+		return true;
+	}
+
+	switch (aggressiveness) {
+		case AggressivenessLevel.Low:
+			return confidence === ConfidenceLevel.High;
+		case AggressivenessLevel.Medium:
+			return confidence === ConfidenceLevel.High || confidence === ConfidenceLevel.Medium;
+		case AggressivenessLevel.High:
+			return true;
+	}
+}
 
 
 class Patch {
@@ -56,6 +85,30 @@ class Patch {
 
 export class XtabCustomDiffPatchResponseHandler {
 
+	private static readonly CONFIDENCE_TAG_REGEX = /<\|confidence\|>(low|medium|high)<\|\/confidence\|>/;
+
+	/**
+	 * Parses the confidence level from a line containing the confidence tag.
+	 * Returns undefined if no confidence tag is found.
+	 */
+	public static parseConfidenceLevel(line: string): ConfidenceLevel | undefined {
+		const match = line.match(XtabCustomDiffPatchResponseHandler.CONFIDENCE_TAG_REGEX);
+		if (!match) {
+			return undefined;
+		}
+		return match[1] as ConfidenceLevel;
+	}
+
+	/**
+	 * Removes the confidence tag from a line if present.
+	 */
+	public static stripConfidenceTag(line: string): string {
+		return line.replace(XtabCustomDiffPatchResponseHandler.CONFIDENCE_TAG_REGEX, '').trim();
+	}
+
+	/**
+	 * Handles the response stream and pushes edits.
+	 */
 	public static async handleResponse(
 		pushEdit: PushEdit,
 		linesStream: AsyncIterableObject<string>,
@@ -63,8 +116,10 @@ export class XtabCustomDiffPatchResponseHandler {
 		window: OffsetRange | undefined,
 	): Promise<void> {
 		let editCount = 0;
-		for await (const edit of XtabCustomDiffPatchResponseHandler.extractEdits(linesStream)) {
+
+		for await (const { edit } of XtabCustomDiffPatchResponseHandler.extractEdits(linesStream)) {
 			editCount++;
+
 			pushEdit(Result.ok({
 				edit: XtabCustomDiffPatchResponseHandler.resolveEdit(edit),
 				window,
@@ -80,9 +135,33 @@ export class XtabCustomDiffPatchResponseHandler {
 		return new LineReplacement(new LineRange(patch.lineNumZeroBased + 1, patch.lineNumZeroBased + 1 + patch.removedLines.length), patch.addedLines);
 	}
 
-	public static async *extractEdits(linesStream: AsyncIterableObject<string>): AsyncGenerator<Patch> {
+	public static async *extractEdits(linesStream: AsyncIterableObject<string>): AsyncGenerator<{ edit: Patch; parsedConfidence: ConfidenceLevel | undefined }> {
 		let currentPatch: Patch | null = null;
+		const lines: string[] = [];
+
+		// Collect all lines first to identify the last line for confidence parsing
 		for await (const line of linesStream) {
+			lines.push(line);
+		}
+
+		// Check for confidence in the last line
+		let parsedConfidence: ConfidenceLevel | undefined;
+		if (lines.length > 0) {
+			const lastLineIdx = lines.length - 1;
+			const confidence = XtabCustomDiffPatchResponseHandler.parseConfidenceLevel(lines[lastLineIdx]);
+			if (confidence !== undefined) {
+				parsedConfidence = confidence;
+				const strippedLine = XtabCustomDiffPatchResponseHandler.stripConfidenceTag(lines[lastLineIdx]);
+				if (strippedLine === '') {
+					lines.pop(); // Remove the confidence-only line
+				} else {
+					lines[lastLineIdx] = strippedLine;
+				}
+			}
+		}
+
+		// Process lines
+		for (const line of lines) {
 			// if no current patch, try to parse a new one
 			if (line.trim() === ResponseTags.NO_EDIT) {
 				break;
@@ -96,13 +175,13 @@ export class XtabCustomDiffPatchResponseHandler {
 				continue;
 			} else { // line does not belong to current patch, yield current and start new
 				if (currentPatch) {
-					yield currentPatch;
+					yield { edit: currentPatch, parsedConfidence };
 				}
 				currentPatch = Patch.ofLine(line);
 			}
 		}
 		if (currentPatch) {
-			yield currentPatch;
+			yield { edit: currentPatch, parsedConfidence };
 		}
 	}
 }
