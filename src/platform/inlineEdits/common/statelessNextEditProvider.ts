@@ -189,6 +189,7 @@ export enum FilteredOutReason {
 	EnforcingNextEditOptions = 'enforcingNextEditOptions',
 	PromptTooLarge = 'promptTooLarge',
 	Uncategorized = 'uncategorized',
+	LowConfidence = 'lowConfidence',
 }
 
 export namespace NoNextEditReason {
@@ -272,6 +273,27 @@ export namespace NoNextEditReason {
 			return `${this.kind}:${this.error.message}`;
 		}
 	}
+	/**
+	 * Signals that all previously streamed edits from this response should be discarded.
+	 * This is used when confidence filtering determines the edit should not be shown
+	 * after edits have already been streamed.
+	 */
+	export class DiscardAllEdits extends NoNextEditReason {
+		public readonly kind = 'discardAllEdits';
+		constructor(
+			public readonly documentBeforeEdits: StringText,
+			public readonly window: OffsetRange | undefined,
+			public readonly reason: string,
+		) {
+			super();
+		}
+		get message(): string {
+			return this.reason;
+		}
+		toString(): string {
+			return `${this.kind}:${this.reason}`;
+		}
+	}
 }
 
 export type NoNextEditReason =
@@ -283,6 +305,7 @@ export type NoNextEditReason =
 	| NoNextEditReason.PromptTooLarge
 	| NoNextEditReason.Uncategorized
 	| NoNextEditReason.Unexpected
+	| NoNextEditReason.DiscardAllEdits
 	;
 
 export class StatelessNextEditResult {
@@ -392,7 +415,7 @@ export class StatelessNextEditTelemetryBuilder {
 		if (result.isError()) {
 			if (result.err instanceof NoNextEditReason.ActiveDocumentHasNoEdits || result.err instanceof NoNextEditReason.NoSuggestions) {
 				// ignore
-			} else if (result.err instanceof NoNextEditReason.GotCancelled || result.err instanceof NoNextEditReason.FilteredOut || result.err instanceof NoNextEditReason.PromptTooLarge) {
+			} else if (result.err instanceof NoNextEditReason.GotCancelled || result.err instanceof NoNextEditReason.FilteredOut || result.err instanceof NoNextEditReason.PromptTooLarge || result.err instanceof NoNextEditReason.DiscardAllEdits) {
 				noNextEditReasonMessage = result.err.message;
 			} else if (result.err instanceof NoNextEditReason.FetchFailure || result.err instanceof NoNextEditReason.Uncategorized || result.err instanceof NoNextEditReason.Unexpected) {
 				noNextEditReasonMessage = result.err.error.stack ? result.err.error.stack : result.err.error.message;

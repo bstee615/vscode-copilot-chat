@@ -137,31 +137,12 @@ export class XtabCustomDiffPatchResponseHandler {
 
 	public static async *extractEdits(linesStream: AsyncIterableObject<string>): AsyncGenerator<{ edit: Patch; parsedConfidence: ConfidenceLevel | undefined }> {
 		let currentPatch: Patch | null = null;
-		const lines: string[] = [];
+		let lastLine: string | undefined;
+		const completedPatches: Patch[] = [];
 
-		// Collect all lines first to identify the last line for confidence parsing
 		for await (const line of linesStream) {
-			lines.push(line);
-		}
+			lastLine = line;
 
-		// Check for confidence in the last line
-		let parsedConfidence: ConfidenceLevel | undefined;
-		if (lines.length > 0) {
-			const lastLineIdx = lines.length - 1;
-			const confidence = XtabCustomDiffPatchResponseHandler.parseConfidenceLevel(lines[lastLineIdx]);
-			if (confidence !== undefined) {
-				parsedConfidence = confidence;
-				const strippedLine = XtabCustomDiffPatchResponseHandler.stripConfidenceTag(lines[lastLineIdx]);
-				if (strippedLine === '') {
-					lines.pop(); // Remove the confidence-only line
-				} else {
-					lines[lastLineIdx] = strippedLine;
-				}
-			}
-		}
-
-		// Process lines
-		for (const line of lines) {
 			// if no current patch, try to parse a new one
 			if (line.trim() === ResponseTags.NO_EDIT) {
 				break;
@@ -173,15 +154,27 @@ export class XtabCustomDiffPatchResponseHandler {
 			// try to add line to current patch
 			if (currentPatch.addLine(line)) {
 				continue;
-			} else { // line does not belong to current patch, yield current and start new
-				if (currentPatch) {
-					yield { edit: currentPatch, parsedConfidence };
-				}
+			} else { // line does not belong to current patch, save it and start new
+				completedPatches.push(currentPatch);
 				currentPatch = Patch.ofLine(line);
 			}
 		}
+
+		// Parse confidence from the last line
+		let parsedConfidence: ConfidenceLevel | undefined;
+		if (lastLine !== undefined) {
+			parsedConfidence = XtabCustomDiffPatchResponseHandler.parseConfidenceLevel(lastLine);
+		}
+
+		// Add the final patch if there is one
 		if (currentPatch) {
-			yield { edit: currentPatch, parsedConfidence };
+			completedPatches.push(currentPatch);
+		}
+
+		// Yield all patches - only the last one gets the parsed confidence
+		for (let i = 0; i < completedPatches.length; i++) {
+			const isLast = i === completedPatches.length - 1;
+			yield { edit: completedPatches[i], parsedConfidence: isLast ? parsedConfidence : undefined };
 		}
 	}
 }

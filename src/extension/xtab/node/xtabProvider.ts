@@ -54,7 +54,7 @@ import { constructTaggedFile, countTokensForLines, getUserPrompt, N_LINES_ABOVE,
 import { nes41Miniv3SystemPrompt, simplifiedPrompt, systemPromptTemplate, unifiedModelSystemPrompt, xtab275SystemPrompt } from '../common/systemMessages';
 import { PromptTags, ResponseTags } from '../common/tags';
 import { CurrentDocument } from '../common/xtabCurrentDocument';
-import { ConfidenceLevel, shouldShowSuggestion, XtabCustomDiffPatchResponseHandler } from './xtabCustomDiffPatchResponseHandler';
+import { shouldShowSuggestion, XtabCustomDiffPatchResponseHandler } from './xtabCustomDiffPatchResponseHandler';
 import { XtabEndpoint } from './xtabEndpoint';
 import { XtabNextCursorPredictor } from './xtabNextCursorPredictor';
 import { charCount, constructMessages, linesWithBackticksRemoved, toLines } from './xtabUtils';
@@ -718,33 +718,12 @@ export class XtabProvider implements IStatelessNextEditProvider {
 			assertNever(opts.responseFormat);
 		}
 
-		// If confidence filtering is enabled, wrap the stream to extract confidence from the last line and strip confidence tags
-		let parsedConfidence: ConfidenceLevel | undefined;
+		// If confidence filtering is enabled, track last line to parse confidence tag when stream ends
+		let lastLineForConfidence: string | undefined;
 		if (enableConfidenceFiltering) {
-			// Transform stream to look ahead one line, so we can detect which line is last
-			// Confidence tag should only be parsed from the last line
-			cleanedLinesStream = new AsyncIterableObject(async (emitter) => {
-				let previousLine: string | undefined;
-				for await (const line of cleanedLinesStream) {
-					if (previousLine !== undefined) {
-						// Emit the previous line (not the last one yet)
-						emitter.emitOne(previousLine);
-					}
-					previousLine = line;
-				}
-				// Now previousLine is the last line - check for confidence
-				if (previousLine !== undefined) {
-					const confidence = XtabCustomDiffPatchResponseHandler.parseConfidenceLevel(previousLine);
-					if (confidence !== undefined) {
-						parsedConfidence = confidence;
-						const strippedLine = XtabCustomDiffPatchResponseHandler.stripConfidenceTag(previousLine);
-						if (strippedLine !== '') {
-							emitter.emitOne(strippedLine);
-						}
-					} else {
-						emitter.emitOne(previousLine);
-					}
-				}
+			cleanedLinesStream = cleanedLinesStream.map((line) => {
+				lastLineForConfidence = line;
+				return line;
 			});
 		}
 
@@ -765,12 +744,6 @@ export class XtabProvider implements IStatelessNextEditProvider {
 				for await (const edit of ResponseProcessor.diff(editWindowLines, cleanedLinesStream, cursorOriginalLinesOffset, diffOptions)) {
 
 					tracer.trace(`ResponseProcessor streamed edit #${i} with latency ${fetchRequestStopWatch.elapsed()} ms`);
-
-					// Check confidence filtering - if enabled and confidence doesn't meet threshold, skip all edits
-					if (enableConfidenceFiltering && !shouldShowSuggestion(parsedConfidence, aggressivenessLevel)) {
-						tracer.trace(`Skipping edit due to confidence filtering: confidence=${parsedConfidence}, aggressiveness=${aggressivenessLevel}`);
-						continue;
-					}
 
 					const singleLineEdits: LineReplacement[] = [];
 					if (edit.lineRange.startLineNumber === edit.lineRange.endLineNumberExclusive || // we don't want to run diff on insertion
@@ -832,6 +805,17 @@ export class XtabProvider implements IStatelessNextEditProvider {
 				if (chatResponseFailure) {
 					pushEdit(Result.error(XtabProvider.mapChatFetcherErrorToNoNextEditReason(chatResponseFailure)));
 					return;
+				}
+
+				// After streaming is complete, check confidence if enabled
+				if (enableConfidenceFiltering && lastLineForConfidence !== undefined) {
+					const parsedConfidence = XtabCustomDiffPatchResponseHandler.parseConfidenceLevel(lastLineForConfidence);
+					if (!shouldShowSuggestion(parsedConfidence, aggressivenessLevel)) {
+						tracer.trace(`Discarding all ${i} edits due to confidence filtering: confidence=${parsedConfidence}, aggressiveness=${aggressivenessLevel}`);
+						// Use DiscardAllEdits to signal consumer should discard streamed edits
+						pushEdit(Result.error(new NoNextEditReason.DiscardAllEdits(request.documentBeforeEdits, editWindow, `lowConfidence:${parsedConfidence ?? 'undefined'}`)));
+						return;
+					}
 				}
 
 				const hadEdits = i > 0;

@@ -557,6 +557,24 @@ export class NextEditProvider extends Disposable implements INextEditProvider<Ne
 				myTracer.trace(`processing edit #${ithEdit} (starts at 0)`);
 
 				if (result.isError()) { // either error or stream of edits ended
+					// Handle DiscardAllEdits - clear any cached edits from this response
+					if (result.err instanceof NoNextEditReason.DiscardAllEdits) {
+						myTracer.trace(`discarding all ${statePerDoc.get(curDocId).nextEdits.length} edits due to: ${result.err.reason}`);
+						// Clear all edits that were accumulated for this document
+						statePerDoc.get(curDocId).nextEdits = [];
+						// Treat this as "no suggestions" for caching purposes
+						const { documentBeforeEdits, window } = result.err;
+						this._nextEditCache.setNoNextEdit(curDocId, documentBeforeEdits, window, req);
+						{
+							disp.dispose();
+							removeFromPending();
+						}
+						if (!firstEdit.isSettled) {
+							firstEdit.complete(Result.error(new NoNextEditReason.FilteredOut(result.err.reason)));
+						}
+						return;
+					}
+
 					// if there was a request made, and it ended without any edits, reset shouldExpandEditWindow
 					if (ithEdit === 0 && result.err instanceof NoNextEditReason.NoSuggestions) {
 						myTracer.trace('resetting shouldExpandEditWindow to false due to NoSuggestions');
