@@ -160,7 +160,8 @@ class LoggedRequestInfo implements ILoggedRequestInfo {
 		if (this.entry.type === LoggedRequestKind.ChatMLSuccess) {
 			responseData = {
 				type: 'success',
-				message: this.entry.result.value
+				message: this.entry.result.value,
+				model: this.entry.result.resolvedModel
 			};
 		} else if (this.entry.type === LoggedRequestKind.ChatMLFailure) {
 			if (this.entry.result.type === ChatFetchResponseType.Length) {
